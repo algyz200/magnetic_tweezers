@@ -1,0 +1,203 @@
+// Analyses the data from Magnetic_Beads macro
+// 1. Calibrates each bead individualy (move objective by a known distance in 4-5 steps)
+// 2. Finds reference bead
+// 3. Calculates z change
+// 4. Corrects for the drift
+
+//Algirdas Toleikis 2013 Spring
+
+//files have to be named like this: beadnb_recording_cal_ref
+//4_29011301_cal_ref_
+//4_29011306_a_ref_   //a is instead of cal
+//4_29011306_a_a_
+
+//use label as identifier
+var reference =  newArray(nResults);
+var refbeadnb;
+count = 0;
+count2=0;
+initialnb=1111;
+calibration = newArray(nResults);
+calibration2 = newArray(nResults);
+
+//pop-up window in the beginning
+Dialog.create("Please choose");
+//Dialog.addCheckbox("Auto save?",true);
+Dialog.addCheckbox("Default z cal?",false);
+//Dialog.addCheckbox("Print cal?",false);
+Dialog.addNumber("If no cal, choose default cal value:",500);  //about 380 for teth, 470 for ref  /1um bead - 480 (500 old e.g.071114) // 68 1um GigE    
+Dialog.addNumber("Drift correction from 2n+1 points, choose n:",20);
+Dialog.show();
+//autosave = Dialog.getCheckbox();
+autosave = true;
+defcal = Dialog.getCheckbox();
+//defcal = false;
+//printcal = Dialog.getCheckbox();
+printcal = true;
+defaultcal=Dialog.getNumber();
+//defaultcal=500;
+n=Dialog.getNumber();  // 2n+1 median
+n=20;
+
+//set default cal, but later, if cal file is there, default changed to the actual cal.
+  for (i=0; i<999; i++) {
+  List.set(i, defaultcal);
+  }
+
+//=============================================================1st looping through all results
+if (nResults == 0) {
+print("ERROR. No file detected. Please drag and drop analysis_raw.xls file and run the program again");
+}
+for (i=0; i<nResults; i++) {
+Label = getResultLabel(i);
+beadtype = split (Label, "_");
+beadnb = beadtype[0];
+recording = beadtype[1];
+z = getResult("Z_vals", i);
+z_obj = getResult("z_obj", i);
+
+// cal files------------------------------------------------cal--------------------------
+  if (defcal==0) {   //defcal
+  if(beadtype[2]=="cal") {
+
+    if (initialnb==beadnb) {  //the same bead
+    count2++;  
+    }
+//############################################################################
+      if (initialnb!=beadnb) {
+//    if (initialnb!=beadnb || i == (nResults-1)) { //new bead met
+//	if (parseFloat(initialnb)<100) {
+//	Plot.create("","","",calibrationsliced, calibration2sliced);
+//	Fit.doFit("Straight Line", calibrationsliced, calibration2sliced);
+//	Fit.plot;
+//	}
+    initialnb=beadnb;
+    count2=0;	    
+    }
+  calibration[count2]=z;  
+  calibration2[count2]=z_obj; 
+
+  calibrationsliced = Array.slice(calibration, 0, count2+1);
+  calibration2sliced = Array.slice(calibration2, 0, count2+1);
+
+
+     Fit.doFit("Straight Line", calibrationsliced, calibration2sliced);
+
+     k=Fit.p(1);
+  List.set(beadnb, k);
+
+
+  } //end cal files--------------------------------------cal------------------------------
+  } //defcal
+
+// ref file -----------------------------------------ref----------------------------+
+  if (beadtype[3]=="ref.gmv") {
+
+    if (beadtype[2] != "cal") {
+    reference[count]=z;
+    refbeadnb = beadnb;
+    count++;
+    }
+  } //end ref file-------------------------------------ref----------------------------
+
+}//==========================================================  1st looping end
+
+//if no ref bead then all values = 0
+
+if (reference[2] == 0 && reference[10] ==0) {  //ref array basicly is empty - 0 values
+reference = newArray(999999);
+refbeadnb = 999;
+List.set(refbeadnb, 0);
+}
+
+//Tethered bead----------------------------------teth------------------------------------   
+
+initialnb=111;
+var z0;
+var dif;
+count=0;  //record of a given bead (reset for each bead)
+var median;
+
+for (i=0; i<nResults; i++) {   // ======================2nd looping through all Results
+
+Label = getResultLabel(i);
+beadtype = split (Label, "_");
+beadnb = beadtype[0];
+
+z = getResult("Z_vals", i);
+zref = reference[count];
+
+ if (beadtype[2] != "cal") {
+ //the same bead
+  if (initialnb == beadnb) {  //change into beadnb and filename later
+  count++;
+  }
+
+//dif bead - reset counting and change initial bd
+  if (initialnb != beadnb) { //different bead
+  initialnb=beadnb;
+  count=0;
+  z0=z;
+  }
+
+ dif =  (z0-z)*List.get(beadnb);
+ setResult("dz", i, dif);
+
+// drift = (reference[count]-reference[0])*List.get(refbeadnb);
+
+  if (count>n) {
+  a = Array.slice(reference, count-n, count+n+1);
+  median = getMedian(a);
+  } else {
+
+   median = reference[count];
+
+  }
+  drift = (median-reference[0])*List.get(refbeadnb);
+
+/*
+  if (beadnb == 2) {
+  print(drift*(-1));
+  }
+*/
+
+ dif2 = dif + drift;
+ setResult("dz_corrected", i, dif2);
+
+ }
+
+} //=========================================2nd ends
+//-----------------------------------------------------teth--------------------------------------------
+if (autosave == 1) {
+ outfile =  getDirectory("Choose a Directory to save the Results"); 
+ outfile = outfile+"analysis.xls";
+ saveAs("Results", outfile); 
+}
+
+print("Calibration values for each bead should appear below. Default = 500");
+if (printcal ==1) {
+	for (i=0; i<List.size; i++) {
+	print(i, "\t", List.get(i));
+	}
+}
+
+//====================
+function getMedian(a) {
+
+a = Array.sort(a);
+
+h = a.length/2;
+hround = round(h);
+
+if ( h == hround) {  //h is integer - even number length array
+median = (a[h]+a[h+1])/2;
+return median;
+}
+if ( h != hround) {  //h is not integer - odd number length array
+median = a[h-0.5];
+return median;
+}
+
+}
+//====================
+

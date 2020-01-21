@@ -1,0 +1,692 @@
+/* USAGE
+
+works only for images from the directory - 1 or n (batch mode).
+if only 1 bead is bead is desired to be analysed, it has to be cut out of a big file and saved into a folder (use GMwriter)
+
+*/
+// results are added to results table without deleting existing 06/03/2013 (for batch mode only)
+//works on 100x 0.45 and 45x 0.45 magnification as wel
+//last changes  - (if max - middle)  > 20, middle = baseline
+//calculate separate baseline for each slide 13 06 2013
+//get info about z of the objective
+//160613 auto detect cal
+//17 06 13 dialog window added for magnification type
+//18 06 13 find the closest point to the middle and fit the line around that point
+// *****************************************************************************************************
+//                                               M A G N E T I C   T W E E Z E R S 
+// *****************************************************************************************************
+//fit a line to the middle intensity points (max-min)/2+min. Advantage: works for different focus
+
+
+// Macro to find central position (x,y) and apparent diameter (proportional to z) of a magnetic bead
+
+//    1)   The program first finds the background level (averaged for all frames in the stack)
+//           If background fluctuations are an issue then this will need to be modified in the future
+
+//    2)   Next find the approximate x,y centre position by thresholding the image and detecting
+// 	centroid (Analyze>Analyze Particles)
+
+//    3)   Then refine the centroid and calculate bead diameter by taking vertical and horizontal
+//          strips and finding the edges of the bead (using the derivative to find the edges) and refining
+//          the edge boundary defined as the baseline intercept
+
+//    4)   Write out all values to the Results Table and draw an ellipse around the bead edge.
+//  
+//                                    Justin Molloy, MRC NIMR, August 2011, Algirdas Toleikis December 2012
+
+cal = 0;
+
+//pop-up window in the beginning
+Dialog.create("Please choose");
+Dialog.addChoice("Magnification", newArray("100x", "45x"));
+Dialog.addCheckbox("Show the acion?",false);
+Dialog.addChoice("Show fitting (do not use for more than 100 frames!)", newArray("None", "horizontal", "vertical"));
+Dialog.addNumber("Test fitting from frame:",0);
+Dialog.addNumber("Test fitting to frame:",100);
+//Dialog.addCheckbox("Autocal x and y?",true);
+Dialog.show();
+magnification = Dialog.getChoice();
+show = Dialog.getCheckbox();
+fitting = Dialog.getChoice();
+from=Dialog.getNumber();
+to=Dialog.getNumber(); 
+//autocal = Dialog.getCheckbox();
+autocal = 1;
+
+if (autocal == 0) {
+Dialog.create("Please choose");
+Dialog.addNumber("cal x and y, um/px", 0.381);
+Dialog.show();
+cal=Dialog.getNumber();
+}
+
+
+
+//Bead edge detection - line fitting parametres
+p =4; // fit the line to p number of points
+j = -2; //points from minimum
+            
+	//if you want to change ONLY in the graphs at the end
+	xcal = 133;		
+	ycal = 133;
+	zcal = 1;
+	tcal = 0.01;		// Time seconds/frame
+
+if (show == 0) {
+setBatchMode(true);  //disable if you want to see all action and graphs at the end.
+}
+
+// Define global variables (common to all functions within this macro)
+	var workingImage=0;
+	var nframes=0;
+
+// Coordinates of "Selected Region"
+	var xoff=0;
+	var yoff=0;
+	var w=0;
+	var h=0;
+
+// keep these global so that can be used as best guesses for next fit in the video.
+	var a = 0;						// Offset >> baseline = 0
+	var b = 30;						// Amplitude >> roughly 30 counts
+	var c = 60;						// mid-point >> mid-way across the selected region
+	var d = 30;						// half-width >> roughly 30 pixels
+
+// All the results
+	var xCentre= 0;
+	var yCentre= 0;
+	var xWidth= 0;
+	var yWidth= 0;
+	var baseline=0;
+	var beadwidth = 0;
+	var  row = 0;
+	var oldbead = 0;
+
+//==================batch mode============
+run("Clear Results");
+// select data directory and generate file list
+     dir = getDirectory("Choose a Directory ");
+
+// generate a "string array" containing all the filenames in the selected directory
+     list = getFileList(dir);
+
+count = 0;
+lasttime=0;
+file=0; // file of particular bead
+
+for (l=0; l<list.length; l++) {
+
+call("java.lang.System.gc"); //clear up memory
+// check they have the ".gmv" extension  
+            if (endsWith(list[l], ".gmv"))
+		{
+		open(dir + list[l]);
+/*
+//when px calibration is wrong in the header of your file=========
+
+nFrames = nSlices;
+run("Properties...", "channels=1 slices=nFrames frames=1 unit=µm pixel_width=0.381 pixel_height=0.381 voxel_depth=0.0010000 frame=[0.00 sec] origin=0,0");
+//                                                                    ============
+*/
+		filename = getTitle();
+                        beadarray = split(filename, "_");
+		bead = beadarray[0];
+		if (oldbead != bead) {
+                        lasttime = 0;
+		file=0; //set to 0 for new bead
+		}
+
+		header = split(getMetadata(), ",");
+	if (autocal == 1) {
+		cal = parseInt(header[7])/1000; // get calibration
+	}
+// Check the image is a stack of at least 10 frames 
+
+ 		if (nSlices>10){	
+		workingImage = getImageID();
+		name = getTitle();
+
+		// first slice is always a dud.. for some reaon so...
+ 		run("Delete Slice");
+
+//===========added for batch mode====add 3 brackets at the end of the macro
+
+	workingImage = getImageID();
+	nframes = nSlices;
+	showStatus("Finding (x,y,z) values....");
+
+	var newxCentre = newArray(nframes);
+	var newyCentre = newArray(nframes);
+	var newxWidth= newArray(nframes);
+	var newyWidth= newArray(nframes);
+
+	getBoundingRect(xoff, yoff, w, h);
+
+
+// smooth the images using a 1-pixel radius local mean filter
+	run("Mean...", "radius=1 stack");
+
+	selectImage(workingImage);
+  	run("Select None");				// In order to define a new Rectangular
+	makeRectangle(xoff, yoff, w, h);			// ROI you have to unselect all other regions
+
+//detect approximate bead centre by thresholding and detecting the particle automaticly
+
+duplicatename = "" + getTitle()+"_"; //modified name of the working file
+run("Select None");
+run("Duplicate...", "title=Duplicate duplicate range=1-nframes");
+rename(duplicatename);
+run("Subtract Background...", "rolling=50 light stack");
+setAutoThreshold("Default");
+//run("Threshold...");
+run("Convert to Mask", "method=Default background=Light calculate");
+
+run("Set Measurements...", "  centroid shape stack display redirect=None decimal=3");
+run("Analyze Particles...", "size=1-Infinity circularity=0.40-1 show=Nothing display stack"); //was 0.7
+circularity = getResult("Circ.");
+xCentre = newArray(nframes);
+yCentre = newArray(nframes);
+
+
+//check if there is no more than 1 bead in the field. if there is - leave only one which is closer to the centre
+oldframe=999;
+centrexold=0;
+centrexold=0;
+olddistance=9999;
+ 
+for (i=row;i<nResults;i++) {
+frame = getResult("Slice", i);
+centrex=getResult("X",i);
+centrey=getResult("Y",i);
+distance=sqrt((centrex-(getWidth()*cal)/2)*(centrex-(getWidth()*cal)/2)+(centrey-(getWidth()*cal)/2)*(centrey-(getWidth()*cal)/2));
+	if (frame == oldframe) {
+	  if (olddistance<distance) {
+	  IJ.deleteRows(i,i);
+	  i=i-1;
+	  } 
+
+	else {
+	  IJ.deleteRows(i-1,i-1);
+	  i=i-1;
+	  }
+ 	}
+oldframe=frame;
+olddistance=distance;
+}//more than 1 bead in the field ends
+
+for (i=0; i<nframes; i++) {
+	xCentre[i]= getResult("X", row)/cal;
+	yCentre[i]= getResult("Y", row)/cal;
+row = row+1;
+}
+
+
+selectWindow(duplicatename);
+close();
+
+
+// ************************   M A I N    P R O G R A M    L O O P  ************************
+
+	for (i=0;i<nframes;i++){				// The master loop!
+	setSlice(i+1);					// Move to next frame (indexed from 1..nframes)
+	nframe = i+1;
+baseline = boundingBaseLine();  //baseline calculated for each frame individually - helps to overcome light fluctuations
+
+// Refine centres & beadwidths based on bead image edges
+if (fitting != "vertical") {
+	run("Select None");
+	makeRectangle(xoff, yCentre[i]-2, w,4);	// Select Horizontal strip 4 pixels high
+
+	setKeyDown("none");
+	L = round(xCentre[i]);
+	newxCentre[i] = refinedCentre(xCentre[i]-xoff)+xoff;
+	newxWidth[i] = beadwidth;			// beadwidth is a global variable that is set
+							// by the "refinedCentre" function.
+}	
+if (fitting != "horizontal") {	
+	run("Select None");
+	makeRectangle(xCentre[i]-2, yoff, 4, h);	// Select Vertical strip 4 pixels wide
+	L = round(yCentre[i]);
+	setKeyDown("alt");
+	newyCentre[i] = refinedCentre(yCentre[i]-yoff)+yoff;
+	newyWidth[i] = beadwidth;
+}
+
+if (fitting == "horizontal") {	
+	newyWidth[i] = newxWidth[i]; //disable vertical strip 
+}
+if (fitting == "vertical") {  
+	newxWidth[i] = newyWidth[i]; //disable horizontal strip 
+}
+
+	showProgress(i/nframes);			// show progress bar
+	}						// do next frame - Master loop
+
+
+
+// Using Pixel coordinate system... display fits on all images:
+// also get the frame time values into the x array
+
+	x = newArray(nframes);
+	getVoxelSize(a,b,tcal,u);
+	setColor(0);
+	setLineWidth(1);
+	zobjective =newArray(nframes);
+	for (i=0; i<nframes; i++){
+		setSlice(i+1);
+		drawOval(newxCentre[i]-newxWidth[i]/2, newyCentre[i]-newyWidth[i]/2, newxWidth[i], newyWidth[i]);
+		label = getMetadata();
+		header = split (label, ",");
+		zobjective[i] = header[20];
+		if (lengthOf(label)>10){
+			indx = indexOf(label,",",1);
+			ct=0;
+			while ((indexOf(label,",",indx)<lengthOf(label)) && (ct<6)){
+			indx = indexOf(label,",",indx)+1;
+			ct=ct+1;
+			}
+			x[i] = parseInt(substring(label,indx,(indexOf(label,",",indx))));
+			x[i] = x[i]/1000+lasttime;
+			} else 	{
+				x[i] = tcal *i+lasttime;
+				}
+	}
+
+// scale all the results appropriately and generate x axis	
+
+for (i=0; i<nframes; i++) newxWidth[i] = (newxWidth[i]+newyWidth[i])/2;
+
+Array.getStatistics( newxCentre, min, max, mean, stdDev);
+minx=min;
+maxx=max;
+meanx=mean;
+stdx=stdDev;
+
+Array.getStatistics( newyCentre, min, max, mean, stdDev);
+miny=min;
+maxy=max;
+meany=mean;
+stdy=stdDev;
+
+Array.getStatistics( newxWidth, min, max, mean, stdDev);
+minz=min;
+maxz=max;
+meanz=mean;
+stdz=stdDev;
+
+// remove the mean offsets and calibrate the results
+	for (i=0; i<nframes; i++){
+	newxCentre[i] = (newxCentre[i] - meanx) * xcal;
+	newyCentre[i] = (newyCentre[i] - meany) * ycal;
+//	newxWidth[i] =  (newxWidth[i] - meanz) * zcal;
+	newxWidth[i] =  newxWidth[i]  * zcal;
+	}
+
+// plot summary graphs:
+	mint = 0; 			//getMin(x);
+	maxt = getMax(x);
+	run("Profile Plot Options...", "width=500 height=200 interpolate draw");
+	Plot.create("Z positions", "Time (s)","Bead diameter (px)");
+//	minz = (minz-meanz)*zcal;
+//	maxz = (maxz-meanz)*zcal;
+	minz = minz * zcal;
+	maxz = maxz * zcal;
+	Plot.setLimits(mint, maxt, minz, maxz);
+	Plot.setColor("black");
+	Plot.add("cirles", x, newxWidth);
+	Plot.add("line", x, newxWidth);
+	Plot.show;
+	rename(filename);
+/*
+	Plot.create("X positions", "Time (s)","X-Posn (nm)");
+	minx=(minx-meanx)*xcal;
+	maxx=(maxx-meanx)*xcal;
+	Plot.setLimits(mint, maxt, minx, maxx);
+	Plot.setColor("red");
+	Plot.add("cirles", x, newxCentre);
+	Plot.add("line", x, newxCentre);
+	Plot.show;
+
+	Plot.create("Y positions", "Time (s)","Y-Posn (nm)");
+	miny=(miny-meany)*ycal;
+	maxy=(maxy-meany)*ycal;
+	Plot.setLimits(mint, maxt, miny, maxy);
+	Plot.setColor("blue");
+	Plot.add("cirles", x, newyCentre);
+	Plot.add("line", x, newyCentre);
+	Plot.show;
+*/
+// Write out the RESULTS table
+	xPS = newArray(newxCentre.length);
+	yPS = newArray(newyCentre.length);
+	zPS = newArray(newxWidth.length);
+
+	xPS = powSpec(newxCentre);
+	yPS = powSpec(newyCentre);
+	zPS = powSpec(newxWidth);
+
+ for (i=0; i<nframes; i++){
+ 
+  setResult("Time", count, x[i]);
+  setResult("X_vals", count, newxCentre[i]);
+  setResult("Y_vals", count, newyCentre[i]);
+  setResult("Z_vals", count, newxWidth[i]);
+//  setResult("X_pow", count, xPS[i]);
+//  setResult("Y_pow", count, yPS[i]);
+//  setResult("Z_pow", count, zPS[i]);
+  setResult("FileNo", count, l);
+  setResult("File", count, file);
+  setResult("z_obj", count, zobjective[i]);
+  setResult("Bead", count, bead);
+  count = count+1;
+  lasttime = x[i];  
+ }
+
+	updateResults;
+	lastFile=l;
+	oldbead = bead;
+	file = file+1;
+
+//added for batch mode========
+}
+}
+if (show == 0) {
+closeallimages();  //close the opened file (to reduce memory usage)
+}
+}
+//for batch===================
+
+if (fitting == "horizontal" || fitting == "vertical") {
+run("Images to Stack", "name=Stack title=fit use");
+}
+
+ 
+
+ outfile=dir + list[lastFile];
+ outfile = substring(outfile, 0, lengthOf(outfile)-4)+".xls";
+ outfile2 = dir + "analysis_raw"+".xls";
+ saveAs("Results",outfile2); 
+
+// ************************   M A I N    P R O G R A M    E N D S   ************************
+
+
+//======================   F U N C T I O N S   ======================
+
+//==================
+function boundingBaseLine() {				// Find the average intensity of ROI peripheral ring.
+
+	run("Select None");
+	makeRectangle(xoff, yoff, w, h);
+
+	List.setMeasurements;
+	f = List.getValue("RawIntDen");
+
+	run("Select None");
+	makeRectangle(xoff+2, yoff+2, w-4, h-4);
+
+	List.setMeasurements;
+	f =f - List.getValue("RawIntDen");
+
+	f = f / ((w*h) - ((w-4)*(h-4)));
+
+
+	return (f);
+}
+
+//===================
+
+function refinedCentre(f){
+
+	y = getProfile();				// Get the "profile" either Horiz. or Vert. STRIPE
+	x = newArray(y.length);
+
+//devide profile into 2 parts. Centre fom thresholding. Centre with 1 px resolution (by thresholding)
+
+	y1=Array.slice(y,0,L);
+	y2=Array.slice(y,L,y.length);
+Array.getStatistics (y, min, max);
+
+//LHS
+//find minima
+minL=255; //max possible pixel value
+for (i=0; i<y1.length; i++) {
+	if (y1[i]<minL) { 
+	posnL=i;
+	minL = y1[i];
+	}
+}
+middle = ((max - min)/2)+min;
+//if ((max-baseline) > 30) {  //for 100x objective
+if (magnification == "100x") {  //for 100x objective
+middle = baseline;
+}
+//go backwards to find the point closest to the middle
+while (y1[posnL]<middle) {
+posnL--; 
+	if (posnL < 4) { // safety switch
+	posnL = posnL+4;
+	middle = 0;
+ 	}
+}
+a = -middle + y1[posnL];
+b = middle -  y1[posnL+1];
+if (a>b) {
+posnL=posnL+1; 
+}
+
+// fill-up fit arrays - we will fit a straight-line
+	yLfit=newArray(p);
+	xLfit=newArray(p);
+
+	for (i=0; i<p;i++){
+	xLfit[i] = posnL-j-i;
+	yLfit[i] = y[posnL-j-i]; // y is profile array
+	}
+
+//RHS
+//find minima
+minR=255; //max possible pixel value
+for (i=0; i<y2.length; i++) {
+	if (y2[i]<minR) { 
+	posnR=i;
+	minR = y2[i];
+	}
+}
+middle = ((max - min)/2)+min;
+//if ((max-baseline) > 30) {  //for 100x objective
+if (magnification == "100x") {  //for 100x objective
+middle = baseline;
+}
+//go forwards to find the point closest to the middle
+
+while (y2[posnR]<middle) {
+posnR++;
+  if (posnR+1>y2.length){
+  middle = 0;
+  posnR = posnR-2;
+  } 
+}
+a = -middle + y1[posnL];
+b = middle -  y1[posnL-1];
+if (a>b) {
+posnL=posnL-1; 
+}
+
+
+// fill-up fit arrays - we will fit a straight-line to 3 points around the bead edge
+	yRfit=newArray(p);
+	xRfit=newArray(p);
+//j=1; // 2 point back from minima. in the future change to more dynamic algorithm?
+
+	for (i=0; i<p;i++){
+	xRfit[i] = posnR+y1.length+j+i;
+	yRfit[i] = y[posnR+y1.length+j+i]; // y is profile array
+	}
+
+// Fit the points to a "Straight Line
+//            y = k + mx
+
+// X-Intercept at the y-baseline intensity threshold
+//            x = (baseline-k) / m
+
+//----------------------------------------------------------------------
+	Fit.doFit("Straight Line", xLfit, yLfit);
+	k=Fit.p(0);
+	m=Fit.p(1);
+	cL=(baseline-k)/m;				// Lefthand edge (Horiz)   
+							// or "Top" edge (Vert)
+	for (i=0; i<p;i++) yLfit[i]=Fit.f(xLfit[i]);
+
+	Fit.doFit("Straight Line", xRfit, yRfit);
+	k=Fit.p(0);
+	m=Fit.p(1);
+	cR=(baseline-k)/m;				// Righthand edge (Horiz)
+							// or "Bottom" edge (Vert)
+	for (i=0; i<p;i++) yRfit[i]=Fit.f(xRfit[i]);
+	for (i=0; i<y.length; i++) x[i] = i;
+
+// Plotting routine... for testing purposes
+if (fitting == "vertical" || fitting == "horizontal") {
+  if (nframe >= from && nframe <= to) {
+	Plot.create("Profile", "X-pixels","Y-intens");
+	Plot.setLimits(getMin(x), getMax(x), getMin(y)-10, getMax(y)+10);
+	Plot.add("cirles", x, y);
+	Plot.setLineWidth(1);
+	Plot.add("line", x ,y);
+
+	Plot.setColor("red");
+	Plot.setLineWidth(2);
+	Plot.add("line", xRfit, yRfit);
+	Plot.add("line", xLfit, yLfit);
+	Plot.show;
+	rename("fit"+nframe);
+	selectImage(workingImage);
+  }
+}
+	beadwidth = cR-cL;				// "beadwidth", is a global variable, and pick
+	return (cL + (cR-cL)/2);			// Return "refined centre" - mid-point between edges.
+
+}
+
+//====================
+function fitPoly(yvals){
+
+//  FIT A "POLYNOMIAL" TO THE INTENSITY PROFILE
+//  Built-in equation runs faster than fitGauss
+//  but rather "dirty"
+
+	x = newArray(yvals.length);
+	for (i=0; i<yvals.length; i++) x[i] = i;		// Fill up the x-array with pixel counts
+
+	Fit.doFit("3rd Degree Polynomial", x, yvals);	// this is very quick but rather dirty!
+
+	yfit = newArray(yvals.length);
+	for (i=0; i<yvals.length; i++) yfit[i] = Fit.f(x[i]);	// Create an array of fitted values
+	midpoint = getMinima(yfit);				// find peak position
+	return midpoint;
+}
+
+//====================
+function fitGauss(yvals){
+
+//  FIT A "GAUSSIAN" TO THE INTENSITY PROFILE
+//  Gaussian fit ------ this does a pretty good job!
+//  Built-in equation runs faster than User function!
+//  y = a + (b-a) * exp(-(cx-c)*(x-c)/(2*d*d))
+
+	x = newArray(yvals.length);
+	for (i=0; i<yvals.length; i++) x[i] = i;		// Fill up the x-array with pixel counts
+
+// The initial guesses are based on results from the previous frame
+   	initialGuesses = newArray(a, b, c, d);
+
+	Fit.doFit("Gaussian", x, yvals, initialGuesses);
+
+// save the fit parameters for the next frame 
+	a = Fit.p(0);
+	b = Fit.p(1);
+	c = Fit.p(2);					// This is the mid-point (or "centre")
+	d = Fit.p(3);
+
+	return c;
+}
+
+//==================
+function getMinima(f){
+
+	min = 1024;
+	xr = 0;
+	for (i=0;i<f.length;i++){
+		if (min > f[i]){ 
+		min = f[i];
+		xr = i;
+		}
+	}
+
+	min = 1024;
+	xl = 0;
+	for (i = (f.length - 1);i>=0;i--){
+		if (min > f[i]){ 
+		min = f[i];
+		xl = i;
+		}
+	}
+
+	return ( floor(xl+((xr-xl)/2)) );
+}
+
+
+//==================
+function getMax(f) {
+	Array.getStatistics(f, min, max);
+	return max;
+}	
+
+//==================
+function getMin(f) {
+	Array.getStatistics(f, min, max);
+	return min;
+}
+
+//==================
+function powSpec(real_in) {
+// PowerSpectrum from Fourier Transform
+
+	N = real_in.length;
+	S = newArray(2*N);
+	P = newArray(N);
+	Array.fill(S,0);
+	Array.fill(P,0);
+
+	for (m=0;m<N/2;m++) {
+	RSm=0;
+	ISm=0;
+	Pi2mn=2*PI*m/N;
+		for (k=0;k<N;k++) {
+			RSm+=real_in[k]*cos(Pi2mn*k);
+			ISm-=real_in[k]*sin(Pi2mn*k);
+		}
+	S[m]=RSm; //real part
+	S[N+m]=ISm; //imaginary part
+	}
+
+//at this point S = Complex: {Re[0],..Re[N-1],Im[0]..Im[N-1]
+
+// calculate one-sided complex amplitudes^2
+	for (m=0;m<N;m++) {
+		P[m] = S[m] * S[m] + S[m+N] * S[m+N];
+	}
+	return P;
+}
+
+//============
+
+function closeallimages () {
+
+while(nImages>0){
+selectImage(nImages);
+close();
+
+}
+
+}

@@ -1,0 +1,192 @@
+//Detects beads automaticly or manually and cuts them out to seperate gmv files
+//Algirdas Toleikis, 2013, NIMR, algirdas.toleikis@gmail.com
+
+
+/* Short explanation of different steps:
+
+1. a) Finds particles from thresholded image (set size cutoff) and Gets ROI list in ROI manager 
+   b)**add the beads to roiManager manually;
+ if 'a)' was chosen then => ( Manually refine bead list)
+2. Draws little box around each bead and saves it seperatelly
+3. either the first file or file with label _cal is saved as _cal; you can choose which beads to save as _ref 
+(note, but only the first bead will be used as cal in magnetic_bead.txt algorithm)
+
+USAGE: Open one file from file series and run the macro. When table pops out - refine bead list
+*/
+
+//=============0. Input DATA ================
+
+
+//Input data1
+minsize = 1; // min size of the bead (varies depending on focus used)
+maxsize = 20;
+mincircularity = 0.75;
+
+//Input data2 - pops-up for the user to input
+Dialog.create("Please choose");
+Dialog.addString("Save into new folder named:", "cut_out")
+Dialog.addNumber("Calibration file:",999);// default value: 999 (i.e. no cal file)
+//Dialog.addNumber("Bead nb shift:",0);          
+Dialog.addNumber("Ref bead:",999);
+Dialog.addMessage("More than 1 bead can be labelled as ref, but only\n the first one will be used by the downstream programs");
+Dialog.addNumber("Ref bead:",999);
+Dialog.addNumber("Ref bead:",999);
+Dialog.addNumber("Ref bead:",999);
+Dialog.addNumber("Ref bead:",999);
+//Dialog.addCheckbox("Autocal x and y?",true);
+//Dialog.addChoice("Bead size", newArray("1um", "2.8um", "1umGigE"));
+Dialog.show();
+//program receives input2 data
+folder = Dialog.getString();
+calfile = Dialog.getNumber(); //number of the cal file
+//shift = Dialog.getNumber(); //number of the ref bead in the list
+shift = 0;
+ref = Dialog.getNumber()+shift; //number of the ref bead in the list
+ref2 = Dialog.getNumber()+shift; //number of the ref bead in the list
+ref3 = Dialog.getNumber()+shift; //number of the ref bead in the list
+ref4 = Dialog.getNumber()+shift; //number of the ref bead in the list
+ref5 = Dialog.getNumber()+shift; //number of the ref bead in the list
+//autocal = Dialog.getCheckbox();
+autocal = true;
+//size = Dialog.getChoice();
+size = "1um";
+
+//if auto cal not chosen
+if (autocal == 0) {
+Dialog.create("Please choose");
+Dialog.addNumber("cal x and y, nm/px", 381);
+Dialog.show();
+cal=Dialog.getNumber();
+}
+
+if (size == "1um") {
+//a=65;			//65 x box around each bead
+a=55;
+
+print("1um beads");
+} 
+if (size == "2.8um") {
+a=115;
+print("2.8um beads");
+} 
+if (size == "1umGigE") {
+a=300;
+print("1umGigE");
+} 
+
+
+dirin = getDirectory("Choose input directory");
+dirout = dirin+folder;
+File.makeDirectory(dirout);
+run("Clear Results");
+list = getFileList(dirin);
+
+
+//=============1. Find beads ================
+
+//variables
+title = "a";
+
+
+if(roiManager("count")==0) { //for finding particals auto. no ROIs in ROI Manager. If there is smth in ROI manager then skip this part
+//assume that file is already opened
+
+if (nImages == 0) {
+print("Please open ROI manager with bead list");
+}
+
+title = getTitle;
+//duplicate, substract the bacground, threshold.
+  run("Duplicate...", "title=Duplicate");
+  duplicate = getImageID();
+  run("Subtract Background...", "rolling=50 light");
+  setAutoThreshold("Default");
+  //run("Threshold...");
+  run("Convert to Mask");
+  run("Convert to Mask");
+  run("Set Measurements...", "area centroid shape display redirect=None decimal=3");
+
+//call particle detection algorithm of ImageJ
+  run("Analyze Particles...", "size=minsize-maxsize circularity=mincircularity-1.00 show=Nothing exclude clear record add");
+
+// Manually refine bead list
+  title = "Refine bead list in roiManager";
+  msg = "If necessary, refine the list and then click \"OK\".";
+  waitForUser(title, msg);
+  
+ dirROIsave = dirin + "/" + "RoiSet.zip";
+print(dirROIsave);
+  roiManager("Save", dirROIsave);
+
+    selectImage(duplicate);
+    close();
+
+} //roiManager("count") ends
+
+
+//=============2. Save beads separately ================
+
+//Draw a little box around each bead and save it seperatelly
+n = roiManager("count"); //number of beads
+
+
+//work through all the files in the directory================================================
+
+setBatchMode(true);
+gmvnb = 0; //.gmv file numbering
+
+for (l=0; l<list.length; l++) { //do all the files in the folder
+call("java.lang.System.gc"); //clear up memory
+  if (endsWith(list[l], ".gmv"))	{  //check they have the ".gmv" extension . another bracket is at the end of the  file
+  gmvnb = gmvnb+1;
+  if (title != list[l]) {
+  open(dirin + list[l]);
+  }
+	if (autocal == 1) {
+		header = split(getMetadata(), ",");
+		cal = parseInt(header[7]); // get calibration
+	}
+  run("Delete Slice"); //delete the first slice
+
+//Detect file name without .gmv and use it later for renaming files
+  name = split (list[l], ".");
+  name2 = split (list[l], "_");
+  nframes2 = nSlices;
+    for (i=0; i<n; i++) {  // select each bead and save it seperately
+    roiManager("select", i);
+    getSelectionBounds(x, y, w, h);
+    makeRectangle(x+w/2-a/2, y+h/2-a/2, a, a);
+    beadnb = i+1+shift;
+    //how to name the new file (e.g. original name +: a) nothing (_a_a),  b) _a_cal, or _cal_ref)
+
+      //file type - if calibration, add name tag "_cal", otherwise -  "_a" 
+
+     if (gmvnb == calfile) {
+     subfile = "" + beadnb +"_"+ name[0]+"_cal";
+      } else { // no _cal label > add _a to each other
+        subfile = ""+beadnb+ "_" + name[0] +"_a";   // renames to have either _cal, or _a (not cal file)        	
+        }
+
+      //bead type - if reference, add name tag "_ref", otherwise -  "_a" 
+
+      if (beadnb==ref || beadnb==ref2 || beadnb==ref3 || beadnb==ref4 || beadnb==ref5 ) {
+      subfile ="" + subfile + "_ref";
+      } else {
+        subfile ="" + subfile + "_a";
+        }
+      subfile = ""+subfile+".gmv";
+
+      //duplicate the 1-bead file and save
+      run("Duplicate...", "title=subfile duplicate range=1-nframes2");
+      subfile_dirout = dirout +"/"+subfile;
+      run("GMV Writer", "save=subfile_dirout");
+      selectWindow("subfile");
+      close();
+   
+    }
+  close(); 
+  }
+}
+call("java.lang.System.gc"); //clear up memory
+print("done!");
+
